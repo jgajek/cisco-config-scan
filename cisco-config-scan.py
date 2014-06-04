@@ -13,12 +13,19 @@ regex_firewall_interface_alias_pix = re.compile(r'\s*nameif (\S+) (\S+) security
 regex_firewall_interface_alias_asa = re.compile(r'\s+nameif (\S+)')
 regex_firewall_interface_no_ip = re.compile(r'\s+no ip address')
 regex_firewall_interface_shutdown = re.compile(r'\s+shutdown')
-regex_firewall_end_stanza = re.compile(r'!')
+regex_end_stanza = re.compile(r'!')
 regex_firewall_access_group = re.compile(r'\s*access-group (\S+) (in|out) interface (\S+)')
 regex_no_password_encryption = re.compile(r'no service password-encryption')
 regex_type7_user_password = re.compile(r'username .* password 7')
 regex_no_aaa_newmodel = re.compile(r'no aaa new-model')
 regex_aaa_authentication_local = re.compile(r'aaa authentication login \S+ local')
+regex_login_authentication_aaa = re.compile(r'\s+login authentication \S+')
+regex_con_line = re.compile(r'line con')
+regex_vty_line = re.compile(r'line vty')
+regex_aux_line = re.compile(r'line aux')
+regex_transport_input_ssh = re.compile(r'\s+transport input ssh')
+regex_exec_timeout = re.compile(r'\s+exec-timeout (\d+) (\d+)')
+regex_access_class = re.compile(r'\s+access-class (\S+)')
 regex_http_server = re.compile(r'ip http server')
 regex_https_server = re.compile(r'ip http secure-server')
 regex_http_acl = re.compile(r'ip http access-class')
@@ -51,7 +58,13 @@ def analyze_config(config):
 	check_no_enhanced_password = False
 	check_aaa_disabled = False
 	check_aaa_authentication_local = False
+	check_con_no_aaa = True
+	check_vty_no_aaa = True
+	check_unencrypted_vty_access = True
 	check_unencrypted_http_server = False
+	check_no_con_timeout = True
+	check_no_vty_timeout = True
+	check_no_vty_acl = True
 	check_no_http_acl = True
 	check_no_snmp_acl = False
 	check_no_logging_host = True
@@ -67,7 +80,11 @@ def analyze_config(config):
 	interface_ignore = False
 
 	http_enabled = False
-	
+
+	con_stanza = False
+	vty_stanza = False
+	aux_stanza = False
+
 	f = open(config)
 	
 	for line in f:
@@ -78,6 +95,12 @@ def analyze_config(config):
 			continue
 		
 		if devicetype == "Firewall":
+			check_con_no_aaa = False
+			check_vty_no_aaa = False
+			check_unencrypted_vty_access = False
+			check_no_con_timeout = False
+			check_no_vty_timeout = False
+			check_no_vty_acl = False
 			check_no_http_acl = False
 			check_no_auth_success_logging = False
 			check_no_auth_failure_logging = False
@@ -99,7 +122,7 @@ def analyze_config(config):
 					interface_ignore = True
 					continue
 				
-				m = regex_firewall_end_stanza.match(line)
+				m = regex_end_stanza.match(line)
 				if m:
 					if not interface_ignore:
 						interfaces[active_interface] = interface_alias
@@ -199,6 +222,79 @@ def analyze_config(config):
 		if m:
 			check_no_http_acl = False
 			continue
+
+		if con_stanza:
+			m = regex_exec_timeout.match(line)
+			if m:
+				if (int(m.group(1)) > 0 or int(m.group(2)) > 0):
+					check_no_con_timeout = False
+				continue
+			m = regex_login_authentication_aaa.match(line)
+			if m:
+				check_con_no_aaa = False
+				continue
+			m = regex_end_stanza.match(line)
+			if m:
+				con_stanza = False
+				continue
+			m = regex_vty_line.match(line)
+			if m:
+				con_stanza = False
+				vty_stanza = True
+				continue
+			m = regex_aux_line.match(line)
+			if m:
+				con_stanza = False
+				aux_stanza = True
+				continue
+
+		if vty_stanza:
+			m = regex_exec_timeout.match(line)
+			if m:
+				if (int(m.group(1)) > 0 or int(m.group(2)) > 0):
+					check_no_vty_timeout = False
+				continue
+			m = regex_login_authentication_aaa.match(line)
+			if m:
+				check_vty_no_aaa = False
+				continue
+			m = regex_access_class.match(line)
+			if m:
+				check_no_vty_acl = False
+				continue
+			m = regex_transport_input_ssh.match(line)
+			if m:
+				check_unencrypted_vty_access = False
+				continue
+			m = regex_end_stanza.match(line)
+			if m:
+				vty_stanza = False
+				continue
+			m = regex_con_line.match(line)
+			if m:
+				vty_stanza = False
+				con_stanza = True
+				continue
+			m = regex_aux_line.match(line)
+			if m:
+				vty_stanza = False
+				aux_stanza = True
+				continue
+
+		m = regex_vty_line.match(line)
+		if m:
+			vty_stanza = True
+			continue
+
+		m = regex_con_line.match(line)
+		if m:
+			con_stanza = True
+			continue
+
+		m = regex_aux_line.match(line)
+		if m:
+			aux_stanza = True
+			continue
 		
 	f.close()
 	
@@ -218,7 +314,13 @@ def analyze_config(config):
 			check_no_enhanced_password,
 			check_aaa_disabled,
 			check_aaa_authentication_local,
+			check_con_no_aaa,
+			check_vty_no_aaa,
+			check_unencrypted_vty_access,
 			check_unencrypted_http_server,
+			check_no_con_timeout,
+			check_no_vty_timeout,
+			check_no_vty_acl,
 			http_enabled and check_no_http_acl,
 			check_no_snmp_acl,
 			check_no_logging_host,
@@ -228,5 +330,11 @@ def analyze_config(config):
 
 for root, dirs, files in os.walk(sys.argv[1]):
     for config in files:
-        print analyze_config(os.path.join(root, config))
-
+		row = analyze_config(os.path.join(root, config))
+		printrow = row[0] + "," + row[1]
+		for item in row[2:]:
+			if item:
+				printrow += ",X"
+			else:
+				printrow += ","
+		print printrow
